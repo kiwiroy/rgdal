@@ -1,9 +1,10 @@
-# dnl Process this file with autoconf to produce a configure script.
+#!/usr/bin/env autoreconf
+dnl Process this file with autoconf to produce a configure script.
 define([pkgversion], esyscmd([sh -c "grep Version: DESCRIPTION | cut -d' ' -f2 | tr -d '\n'"]))dnl
 AC_INIT(rgdal, [pkgversion], Roger.Bivand@nhh.no)
 AC_CONFIG_SRCDIR(src/gdal-bindings.cpp)
-
-# AC_PROG_CXX()
+AC_CONFIG_MACRO_DIRS([inst/m4])
+AC_PROG_CXX()
 
 # find R home and set correct compiler + flags
 : ${R_HOME=`R RHOME`}
@@ -65,113 +66,111 @@ fi
 
 AC_MSG_NOTICE([${PACKAGE_NAME}: ${PACKAGE_VERSION}])
 
-AC_CHECK_FILE([/usr/bin/svnversion],
- [SVN_VERSION=`svnversion -n '.'`],
- [SVN_VERSION=""])
-
-#SVN_VERSION=`svnversion -n '.'`
-if test "${SVN_VERSION}" != "exported" && test -n "${SVN_VERSION}" && test "${SVN_VERSION}" != "Unversioned directory"; then
-  echo "${SVN_VERSION}" > inst/SVN_VERSION
-else
-  SVN_VERSION=`cat inst/SVN_VERSION | tr -d '\n'`
-fi
+#
+# Use subversion version to report
+#
+AC_PATH_PROG([SVN_VERSION], [svnversion])
+AS_IF([ test -n "${SVN_VERSION}" ], [
+dnl extract version from checkout
+  SVN_VERSION=`${SVN_VERSION} -n '.'`
+  AS_IF([ test "${SVN_VERSION}" != "exported" &&
+          test "${SVN_VERSION}" != "Unversioned directory" ], [
+dnl write version to inst/SVN_VERSION
+            echo "${SVN_VERSION}" > inst/SVN_VERSION
+        ], [
+dnl read version from inst/SVN_VERSION
+            SVN_VERSION=`cat inst/SVN_VERSION | tr -d '\n'`
+        ])
+  ], [
+dnl read version from inst/SVN_VERSION
+    SVN_VERSION=`cat inst/SVN_VERSION | tr -d '\n'`
+  ])
 AC_MSG_NOTICE([svn revision: ${SVN_VERSION}])
 
-#GDAL
+#CXX_11
+AX_CXX_COMPILE_STDCXX([11], [ext], [optional])
+AS_IF([ test "x${HAVE_CXX11}" = "x1" ],
+  [AC_MSG_NOTICE([C++11 support available])],
+  [AC_MSG_NOTICE([C++11 support not available])]
+)
 
-GDAL_CONFIG="gdal-config"
+#
+# check packages exist with pkg-config
+#
+PKG_CHECK_EXISTS([gdal proj],
+  [AC_MSG_NOTICE([gdal exists, continuing...])],
+  [AC_MSG_ERROR([Failed to find gdal _and_ proj4 consider installing, setting PKG_CONFIG_PATH])]
+  )
 
-GDAL_CONFIG_SET="no"
+#
+# GDAL - details with pkg-config and gdal-config
+#
+PKG_CHECK_MODULES([GDAL], [gdal >= 1.11.4], [
+dnl copy CFLAGS to CPPFLAGS
+  AC_SUBST([GDAL_CPPFLAGS], ["${GDAL_CFLAGS}"])
+dnl get version of GDAL
+  PKG_CHECK_VAR([GDAL_VERSION], [gdal], [CONFIG_VERSION],
+    [AC_MSG_NOTICE([VERSION = "${GDAL_VERSION}"])],
+    [AC_MSG_ERROR([gdal.pc missing version])])
 
+dnl get data directory - may be incorrect https://github.com/OSGeo/gdal/issues/608
+  PKG_CHECK_VAR([GDAL_DATADIR], [gdal], [datadir],
+    [AC_MSG_NOTICE([DATADIR = "${GDAL_DATADIR}"])],
+    [AC_MSG_ERROR([gdal.pc missing datadir])])
+
+dnl get gdal prefix
+  PKG_CHECK_VAR([GDAL_PREFIX], [gdal], [prefix],
+    [AC_MSG_NOTICE([PREFIX  = "${GDAL_PREFIX}"])],
+    [AC_MSG_ERROR([gdal.pc missing prefix])])
+
+dnl check version and CXX11 availability
+  AS_IF([ test `${PKG_CONFIG} gdal --atleast-version=2.3.0` ],[
+    AC_MSG_CHECKING([C++11 support for GDAL >= 2.3.0])
+    AS_IF([ test "x${HAVE_CXX11}" = "x1" ],
+      [AC_MSG_RESULT([yes])],
+      [
+        AC_MSG_RESULT([no])
+        AC_MSG_ERROR([provide at least CXX11 compiler support for GDAL >= 2.3.0])
+      ]
+    )
+  ])
+  ], [AC_MSG_ERROR([upgrade GDAL to 1.11.4 or later])])
+
+#
+# Need to use gdal-config - often more accurate
+#
 AC_ARG_WITH([gdal-config],
     AC_HELP_STRING([--with-gdal-config=GDAL_CONFIG],
            [the location of gdal-config]),
            [gdal_config=$withval])
-if test [ -n "$gdal_config" ] ; then
-    GDAL_CONFIG_SET="yes"
+AS_IF([ test  -n "$gdal_config" ], [
     AC_SUBST([GDAL_CONFIG],["${gdal_config}"])
     AC_MSG_NOTICE(gdal-config set to $GDAL_CONFIG)
-fi
+], [
+  AC_PATH_PROG([GDAL_CONFIG], [gdal-config],[
+    AC_MSG_ERROR([gdal-config not found in PATH])
+  ])
+])
 
-if test ["$GDAL_CONFIG_SET" = "no"] ; then
-  AC_PATH_PROG([GDAL_CONFIG], ["$GDAL_CONFIG"],["no"])
-  if test ["$GDAL_CONFIG" = "no"] ; then
-    AC_MSG_RESULT(no)
-    AC_MSG_ERROR([gdal-config not found or not executable.])
-  fi
-else
-  AC_MSG_CHECKING(gdal-config exists)
-  if test -r "${GDAL_CONFIG}"; then
-    AC_MSG_RESULT(yes)
-  else
-    AC_MSG_RESULT(no)
-    AC_MSG_ERROR([gdal-config not found - configure argument error.])
-  fi
-  AC_MSG_CHECKING(gdal-config executable)
-  if test -x "${GDAL_CONFIG}"; then
-    AC_MSG_RESULT(yes)
-  else
-    AC_MSG_RESULT(no)
-    AC_MSG_ERROR([gdal-config not executable.])
-  fi
-fi
-
-
+dnl catch user error specifying incorrect path in --with-gdal-config=
 AC_MSG_CHECKING(gdal-config usability)
-if test `${GDAL_CONFIG} --version`;
-then
-
-	GDAL_CPPFLAGS=`${GDAL_CONFIG} --cflags`
-	GDAL_LIBS=`${GDAL_CONFIG} --libs`
-        GDAL_VERSION=`${GDAL_CONFIG} --version`
-        GDAL_DEP_LIBS=`${GDAL_CONFIG} --dep-libs`
-        GDAL_DATADIR=`${GDAL_CONFIG} --datadir`
-        gdalok=yes
-        AC_MSG_RESULT(yes)
-else
-        AC_MSG_RESULT(no)
-	echo "Error: gdal-config not found"
-	echo "The gdal-config script distributed with GDAL could not be found."
-	echo "If you have not installed the GDAL libraries, you can"
-	echo "download the source from  http://www.gdal.org/"
-	echo "If you have installed the GDAL libraries, then make sure that"
-	echo "gdal-config is in your path. Try typing gdal-config at a"
-	echo "shell prompt and see if it runs. If not, use:"
-	echo " --configure-args='--with-gdal-config=/usr/local/bin/gdal-config'"
-	echo "with appropriate values for your installation."
-	echo ""
-
-	exit 1
-
-fi
-
-AC_MSG_NOTICE([GDAL: ${GDAL_VERSION}])
-#GDAL_VER_DOT=`echo $GDAL_VERSION | tr -d "."`
-GDAL_MAJOR=`echo $GDAL_VERSION | cut -f1 -d"."`
-GDAL_MINOR=`echo $GDAL_VERSION | cut -f2 -d"."`
-GDAL_PATCH=`echo $GDAL_VERSION | cut -f3 -d"."`
-
-if test ${GDAL_MAJOR} = 2 -a ${GDAL_MINOR} -ge 3 ; then
-  AC_MSG_CHECKING([C++11 support for GDAL >= 2.3.0])
-  if test ${HAVE_CXX11} = 1 ; then
-    AC_MSG_RESULT(yes)
-  else
-    AC_MSG_RESULT(no)
-    AC_MSG_ERROR([provide at least CXX11 compiler support for GDAL >= 2.3.0])
-  fi
-fi
-
-AC_MSG_CHECKING([GDAL version >= 1.11.4])
-if test ${GDAL_MAJOR} -gt 1 ; then
+AS_IF([test `${GDAL_CONFIG} --version`], [
   AC_MSG_RESULT(yes)
-else
-  if test ${GDAL_MAJOR} = 1 -a ${GDAL_MINOR} = 11 -a ${GDAL_PATCH} -ge 4 ; then
-    AC_MSG_RESULT(yes)
-  else
-    AC_MSG_RESULT(no)
-    AC_MSG_ERROR([upgrade GDAL to 1.11.4 or later])
-  fi
-fi
+  GDAL_DEP_LIBS=`${GDAL_CONFIG} --dep-libs`
+  GDAL_DATADIR=`${GDAL_CONFIG} --datadir`
+  ], [
+  AC_MSG_RESULT(no)
+  AC_MSG_ERROR([gdal-config not found
+    The gdal-config script distributed with GDAL could not be found.
+	  If you have not installed the GDAL libraries, you can
+	  download the source from  http://www.gdal.org/
+	  If you have installed the GDAL libraries, then make sure that
+	  gdal-config is in your path. Try typing gdal-config at a
+	  shell prompt and see if it runs. If not, use:
+	    --configure-args='--with-gdal-config=/usr/local/bin/gdal-config'
+	  with appropriate values for your installation.
+  ])
+])
 
 INLIBS="${LIBS}"
 INCPPFLAGS="${CPPFLAGS}"
@@ -186,232 +185,147 @@ AC_SUBST([PKG_LIBS], ["${INPKG_LIBS} ${GDAL_LIBS}"])
 # since we'll set PKG_CPPFLAGS with this, but that shouldn't hurt
 CPPFLAGS="${INCPPFLAGS} ${PKG_CPPFLAGS}"
 
+AC_LANG_PUSH([C++])
+AC_MSG_NOTICE(gdal: linking with --libs only)
+AC_CHECK_LIB([gdal], [GDALAllRegister],
+  [NEED_DEPS="no"],[NEED_DEPS="yes"], [${GDAL_LIBS}])
 
-NEED_DEPS=no
-LIBS="${INLIBS} ${PKG_LIBS}"
-[cat > gdal_test.cc <<_EOCONF
-#include <gdal.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
-int main() {
-GDALAllRegister();
-}
-#ifdef __cplusplus
-}
-#endif
-_EOCONF]
-
-AC_MSG_CHECKING(gdal: linking with --libs only)
-${CXX} ${CPPFLAGS} -o gdal_test gdal_test.cc ${LIBS} 2> errors.txt
-if test `echo $?` -ne 0 ; then
-gdalok=no
-AC_MSG_RESULT(no)
-else
-AC_MSG_RESULT(yes)
-fi
-
-if test "${gdalok}" = no; then
-AC_MSG_CHECKING(gdal: linking with --libs and --dep-libs)
-LIBS="${LIBS} ${GDAL_DEP_LIBS}"
-gdalok=yes
-${CXX} ${CPPFLAGS} -o gdal_test gdal_test.cc ${LIBS} 2>> errors.txt
-if test `echo $?` -ne 0 ; then
-gdalok=no
-fi
-if test "${gdalok}" = yes; then
-    NEED_DEPS=yes
-    AC_MSG_RESULT(yes)
-else
-    AC_MSG_RESULT(no)
-fi
-fi
-
-if test "${gdalok}" = no; then
-   cat errors.txt
-   AC_MSG_NOTICE([Install failure: compilation and/or linkage problems.])
-   AC_MSG_ERROR([GDALAllRegister not found in libgdal.])
-fi
-
-rm -f gdal_test errors.txt gdal_test.cc
-
+AS_IF([test "x${NEED_DEPS}" = "xyes"], [
+  AC_MSG_NOTICE(gdal: linking with --libs and --dep-libs)
+  dnl clear cache otherwise the previous result is returned from cache
+  dnl and this check lib is never run
+  AS_UNSET([ac_cv_lib_gdal_GDALAllRegister])
+  AC_CHECK_LIB([gdal], [GDALAllRegister],
+    [NEED_DEPS="yes"],[
+      AC_MSG_NOTICE([Install failure: compilation and/or linkage problems.])
+      AC_MSG_ERROR([GDALAllRegister not found in libgdal.])
+    ], [${GDAL_LIBS} ${GDAL_DEP_LIBS}])
+  ])
+AC_LANG_POP([C++])
 
 GDAL_DATA_TEST_FILE="${GDAL_DATADIR}/pcs.csv"
 AC_MSG_CHECKING(GDAL: ${GDAL_DATADIR}/pcs.csv readable)
-if test -r "${GDAL_DATA_TEST_FILE}" ; then
-  AC_MSG_RESULT(yes)
-else
-  AC_MSG_RESULT(no)
-  AC_MSG_ERROR([pcs.csv not found in GDAL data directory.])
-fi
+AS_IF([ test -r "${GDAL_DATA_TEST_FILE}" ], [
+    AC_MSG_RESULT(yes)
+  ], [
+    AC_MSG_RESULT(no)
+    AC_MSG_ERROR([pcs.csv not found in GDAL data directory.])
+  ])
 
 # PROJ.4
-
-# copied from sf/configure.ac
-
-PROJ_CONFIG="pkg-config proj"
-
-if `$PROJ_CONFIG --exists` ; then
-  AC_MSG_NOTICE([pkg-config proj exists, will use it])
-  proj_config_ok=yes
-else
-  proj_config_ok=no
-fi
-
-PROJ_VERSION=""
-
-if test "${proj_config_ok}" = yes; then
-  PROJ_VERSION=`${PROJ_CONFIG} --modversion`
-  AC_MSG_NOTICE([PROJ version: ${PROJ_VERSION}])
-fi
-
-PKG_CPPFLAGS=""
-
-AC_ARG_WITH([proj-include],
-    AC_HELP_STRING([--with-proj-include=DIR],
-                   [location of proj header files]),
-    [proj_include_path=$withval])
-if test [ -n "$proj_include_path" ] ; then
-   proj_include_path="-I${proj_include_path}"
-   AC_SUBST([PKG_CPPFLAGS],["${proj_include_path} ${INPKG_CPPFLAGS}"])
-else
-  if test "${proj_config_ok}" = yes; then
-    PROJ_INCLUDE_PATH=`${PROJ_CONFIG} --cflags`
-    proj_include_path=${PROJ_INCLUDE_PATH}
-    AC_SUBST([PKG_CPPFLAGS],["${PROJ_INCLUDE_PATH} ${INPKG_CPPFLAGS}"])
-  fi
-fi
 
 # honor PKG_xx overrides
 # for CPPFLAGS we will superfluously double R's flags
 # since we'll set PKG_CPPFLAGS with this, but that shouldn't hurt
 CPPFLAGS="${INCPPFLAGS} ${PKG_CPPFLAGS}"
 
-PKG_LIBS=""
-          
-# dnl ditto for a library path
+AC_ARG_WITH([proj-include],
+    AC_HELP_STRING([--with-proj-include=DIR],
+                   [location of proj header files]),
+    [proj_include_path=$withval])
+
 AC_ARG_WITH([proj-lib],
     AC_HELP_STRING([--with-proj-lib=LIB_PATH],
                [the location of proj libraries]),
                [proj_lib_path=$withval])
-if test [ -n "$proj_lib_path" ] ; then
-    AC_SUBST([PKG_LIBS], ["-L${proj_lib_path} ${INPKG_LIBS}"])
-else
-  if test ${proj_config_ok} = "yes"; then
-    PROJ_LIB_PATH=`${PROJ_CONFIG} --libs`
-    AC_SUBST([PKG_LIBS], ["${PROJ_LIB_PATH} ${INPKG_LIBS}"])
-  else
-    AC_SUBST([PKG_LIBS], ["${INPKG_LIBS} -lproj"])
-  fi
-fi
 
-LIBS="${INLIBS} ${PKG_LIBS}"
-#PKG_LIBS="${PKG_LIBS} -lproj"
-#AC_MSG_NOTICE([${CFLAGS} ${PKG_CPPFLAGS}])
-AC_MSG_CHECKING(proj_api.h presence and usability)
-# FIXME re-using names
-[cat > proj_conf_test1.c <<_EOCONF
-#include <stdio.h>
-#include <proj_api.h>
+AS_IF(
+  [ test -z "$proj_lib_path" && test -z "$proj_include_path" ],
+  [ dnl test -z "$proj_lib_path" || test -z "$proj_include_path" success
+    AC_MSG_NOTICE([no paths in --configure-args])
+    PKG_CHECK_MODULES([PROJ4], [proj >= 4.8.0],
+      [ dnl get version of proj4
+      PROJ4_VERSION=`${PKG_CONFIG} proj --modversion`
+      AC_MSG_NOTICE([VERSION = "${PROJ4_VERSION}"])
+      AC_MSG_NOTICE([CFLAGS = ${PROJ4_CFLAGS}])
+      AC_MSG_NOTICE([LIBS = ${PROJ4_LIBS}])
+      ],
+      [ dnl failed to find proj.pc
+      AC_MSG_NOTICE([PROJ is required])
+      AC_MSG_ERROR([upgrade PROJ to 4.8.0 or later])
+      ])
+  ],
+  [ dnl test -z "$proj_lib_path" || test -z "$proj_include_path" fail
+    AC_MSG_NOTICE([checking for proj4 in user specified dirs])
+    AS_IF([ test -n "$proj_include_path" ],
+          [ dnl user specified a path
+            AC_MSG_NOTICE([--with-proj-include=${proj_include_path}])
+            proj_include_path="-I${proj_include_path}"
+            AC_SUBST([PKG_CPPFLAGS],["${proj_include_path} ${INPKG_CPPFLAGS}"])
+          ])
+    AS_IF([ test -n "$proj_lib_path" ],
+          [ dnl user specified a path to library shared object
+            dnl - does not add -lproj
+            AC_MSG_NOTICE([--with-proj-lib=${proj_lib_path}])
+            proj_lib_path="-L${proj_lib_path}"
+            AC_SUBST([PKG_LIBS],["${proj_include_path} ${INPKG_LIBS}"])
+          ])
+  ]
+)
 
-int main() {
-    printf("%d\n", PJ_VERSION);
-    exit(0);
-}
-_EOCONF]
-
-if test `${CC} ${CFLAGS} ${PKG_CPPFLAGS} -o proj_conf_test1 proj_conf_test1.c ${PKG_LIBS} 2> /dev/null; echo $?` = 0; then
-  AC_MSG_RESULT(yes)
-else
-  AC_MSG_RESULT(no)
+CPPFLAGS="$CPPFLAGS $PROJ4_CFLAGS"
+AC_CHECK_HEADER([proj_api.h], [], [
   AC_MSG_ERROR([proj_api.h not found in standard or given locations.])
-fi
+  ])
+AC_RUN_IFELSE([AC_LANG_PROGRAM([dnl
+#include <stdio.h>
+#include <proj_api.h>], [dnl
+printf("%d\n", PJ_VERSION);
+return 0;
+])], [PROJ4_VERSION_H=`./conftest$EXEEXT`], [
+  AC_MSG_ERROR([failed to get version from proj_api.h])
+  ])
 
-PROJ_VERSION_H=`./proj_conf_test1`
-
-rm -f proj_conf_test1.c proj_conf_test1
-
-#AC_MSG_NOTICE(["${PROJ_VERSION} ${PROJ_VERSION_H}"])
-
-if test ${PROJ_VERSION} = "" ; then
-  AC_MSG_CHECKING([PROJ version agreement])
-  PROJ_VERSION_DOT=`echo ${PROJ_VERSION} | tr -d "."`
-#echo "|${PROJ_VERSION}| |${PROJ_VERSION_DOT}| |${PROJ_VERSION_H}|"
-  if test ${PROJ_VERSION_DOT}$ = ${PROJ_VERSION_H}$; then
-    AC_MSG_RESULT(yes)
-  else
-    AC_MSG_RESULT(no)
+AC_MSG_NOTICE([proj.4 versions ${PROJ4_VERSION} vs ${PROJ4_VERSION_H}])
+AC_MSG_CHECKING([PROJ version agreement])
+AS_IF([ test `echo ${PROJ4_VERSION} | tr -d "."` = ${PROJ4_VERSION_H}],
+  [ AC_MSG_RESULT([yes]) ], [
+    AC_MSG_RESULT([no])
     AC_MSG_ERROR([proj_api.h and pkg-config give different versions])
-  fi
-fi
+  ])
 
-AC_MSG_CHECKING([PROJ version >= 4.8.0])
-if test ${PROJ_VERSION_H} -lt 480 ; then
-  AC_MSG_RESULT(no)
-  AC_MSG_ERROR([upgrade PROJ to 4.8.0 or later])
-else
-  AC_MSG_RESULT(yes)
-fi
-
-if test ${PROJ_VERSION_H} = 480 ; then
+AS_IF([ test "${PROJ4_VERSION}" = "4.8.0" ], [
+dnl unsure if $srcdir would be enough here rather than pwd
   ADDED_PKG_INCL_480=`pwd`"/inst/include"
   AC_SUBST([PKG_CPPFLAGS],["${PKG_CPPFLAGS} -I${ADDED_PKG_INCL_480}"])
   proj_include_path="${PKG_CPPFLAGS} -I${ADDED_PKG_INCL_480}"
   CPPFLAGS="${INCPPFLAGS} ${PKG_CPPFLAGS}"
-fi
+])
+
+AC_CHECK_HEADER([projects.h], [], [
+  AC_MSG_ERROR([projects.h not found in standard or given locations.
+    PROJ 4.8.0 was bundled wrongly, and did not provide
+    the file. A copy is provided in init/include in the source
+    package for the users to place in the same directory
+    as proj_api.h manually.
+    ])
+  ])
 
 #AC_MSG_NOTICE([${CFLAGS} ${PKG_CPPFLAGS}])
 
-AC_MSG_CHECKING(projects.h presence and usability)
-# FIXME re-using names
-[cat > proj_conf_test1a.c <<_EOCONF
-#include <stdio.h>
-#include <projects.h>
-
-int main() {
-    exit(0);
-}
-_EOCONF]
-
-if test `${CC} ${CFLAGS} ${PKG_CPPFLAGS} -o proj_conf_test1a proj_conf_test1a.c ${PKG_LIBS} 2> /dev/null; echo $?` = 0; then
-  AC_MSG_RESULT(yes)
-else
-  AC_MSG_RESULT(no)
-  STOP="stop"
-fi
-rm -f proj_conf_test1a.c proj_conf_test1a
-
-if test "$STOP" = "stop" ; then
-    echo "projects.h not found in standard or given locations."
-    echo "PROJ 4.8.0 was bundled wrongly, and did not provide"
-    echo "the file. A copy is provided in init/include in the source"
-    echo "package for the users to place in the same directory"
-    echo "as proj_api.h manually."
-    exit 1
-fi
-
 AC_SUBST([PKG_CPPFLAGS],["-DP4CTX=1 ${PKG_CPPFLAGS}"])
 
+#
+# Check location of proj metadata files
+#
 AC_ARG_WITH([proj-share],
     AC_HELP_STRING([--with-proj-share=SHARE_PATH],
                [the location of proj metadata files]),
                [proj_share_path=$withval])
-if test [ -n "$proj_share_path" ] ; then
-    AC_MSG_NOTICE([PROJ_LIB: ${proj_share_path}])
-fi
+AS_IF([ test -n "$proj_share_path" ],
+  [AC_MSG_NOTICE([PROJ_LIB: ${proj_share_path}])])
 
+AS_IF([ test -n "$proj_share_path" ],[
+  AC_MSG_CHECKING(PROJ.4: epsg found and readable)
+  LIBS="${PKG_LIBS} ${PROJ4_LIBS}"
+  PROJ_LIB="$proj_share_path"
 
-
-
-
-[cat > proj_conf_test2.c <<_EOCONF
+  AC_RUN_IFELSE([AC_LANG_PROGRAM([dnl
 #include <stdio.h>
 #include <proj_api.h>
 #if PJ_VERSION == 480
 FILE *pj_open_lib(projCtx, const char *, const char *);
-#endif
-
-int main() {
+#endif], [dnl
 #if PJ_VERSION == 480
     FILE *fp;
 #else
@@ -420,54 +334,31 @@ int main() {
     projCtx ctx;
     ctx = pj_get_default_ctx();
     fp = pj_open_lib(ctx, "epsg", "rb");
-    if (fp == NULL) exit(1);
+    if (fp == NULL) return 1;
 #if PJ_VERSION == 480
     fclose(fp);
 #else
     pj_ctx_fclose(ctx, fp);
 #endif
-    exit(0);
-}
-_EOCONF]
+    return 0;
+])], [AC_MSG_RESULT([yes])], [
+  AC_MSG_RESULT([no])
+  AC_MSG_ERROR([proj/epsg not found
+    Either install missing proj support files, for example
+    the proj-nad and proj-epsg RPMs on systems using RPMs,
+    or if installed but not autodetected, set PROJ_LIB to the
+    correct path, and if need be use the --with-proj-share=
+    configure argument.
+    ])])
+dnl end of AC_RUN_IFELSE
 
-${CC} ${CFLAGS} ${PKG_CPPFLAGS} -o proj_conf_test2 proj_conf_test2.c ${PKG_LIBS}
-if test [ -n "$proj_share_path" ] ; then
-  PROJ_LIB="${proj_share_path}" ./proj_conf_test2
-  proj_share=`echo $?`
-else
-  ./proj_conf_test2
-  proj_share=`echo $?`
-fi
-
-AC_MSG_CHECKING(PROJ.4: epsg found and readable)
-if test ${proj_share} -eq 1 ; then
-    AC_MSG_RESULT(no)
-    STOP="stop"
-else
-    AC_MSG_RESULT(yes)
-fi
-
-rm -f proj_conf_test2.c proj_conf_test2
-
-if test "$STOP" = "stop" ; then
-    echo "Error: proj/epsg not found"
-    echo "Either install missing proj support files, for example"
-    echo "the proj-nad and proj-epsg RPMs on systems using RPMs,"
-    echo "or if installed but not autodetected, set PROJ_LIB to the"
-    echo "correct path, and if need be use the --with-proj-share="
-    echo "configure argument."
-    exit 1
-fi
-
-
-[cat > proj_conf_test3.c <<_EOCONF
+  AC_MSG_CHECKING(PROJ.4: conus found and readable)
+  AC_RUN_IFELSE([AC_LANG_PROGRAM([dnl
 #include <stdio.h>
 #include <proj_api.h>
 #if PJ_VERSION == 480
 FILE *pj_open_lib(projCtx, const char *, const char *);
-#endif
-
-int main() {
+#endif], [dnl
 #if PJ_VERSION == 480
     FILE *fp;
 #else
@@ -476,80 +367,64 @@ int main() {
     projCtx ctx;
     ctx = pj_get_default_ctx();
     fp = pj_open_lib(ctx, "conus", "rb");
-    if (fp == NULL) exit(1);
+    if (fp == NULL) return 1;
 #if PJ_VERSION == 480
     fclose(fp);
 #else
     pj_ctx_fclose(ctx, fp);
 #endif
-    exit(0);
-}
-_EOCONF]
+    return 0;
+])], [AC_MSG_RESULT([yes])], [
+  AC_MSG_RESULT([no])
+  AC_MSG_WARN([Note: proj/conus not found
+    No support available in PROJ4 for NAD grid datum transformations
+    If required, consider re-installing from source with the contents
+    of proj-datumgrid-1.<latest>.zip from http://download.osgeo.org/proj/ in nad/.
+    ])])
+dnl end of AC_RUN_IFELSE
 
-${CC} ${CFLAGS} ${PKG_CPPFLAGS} -o proj_conf_test3 proj_conf_test3.c ${PKG_LIBS}
-if test [ -n "$proj_share_path" ] ; then
-  PROJ_LIB="${proj_share_path}" ./proj_conf_test3
-  proj_share=`echo $?`
-else
-  ./proj_conf_test3
-  proj_share=`echo $?`
-fi
-
-AC_MSG_CHECKING(PROJ.4: conus found and readable)
-if test ${proj_share} -eq 1 ; then
-    WARN="warn"
-    AC_MSG_RESULT(no)
-else
-    AC_MSG_RESULT(yes)
-fi
-
-rm -f proj_conf_test3.c proj_conf_test3
-
-if test "$WARN" = "warn" ; then
-    echo "Note: proj/conus not found"
-    echo "No support available in PROJ4 for NAD grid datum transformations"
-    echo "If required, consider re-installing from source with the contents"
-    echo "of proj-datumgrid-1.<latest>.zip from http://download.osgeo.org/proj/ in nad/."
-fi
+])
 
 # Optional local copy of GDAL datadir and PROJ_LIB
 
-data_copy=no
+AC_ARG_WITH([proj-data],
+  AC_HELP_STRING([--with-proj-data=DIR],
+                 [location of PROJ.4 data directory]),
+                 [proj_lib1=$withval])
 AC_ARG_WITH([data-copy],
     AC_HELP_STRING([--with-data-copy=yes/no],
                [local copy of data directories in package, default no]),
                [data_copy=$withval])
-if test "${data_copy}" = "yes" ; then
-AC_MSG_NOTICE([Copy data for:])
+
+AS_IF([ test "x${data_copy}" = "xyes" ], [ dnl try to copy
+  AC_MSG_NOTICE([Copy data for:])
   proj_lib0="${PROJ_LIB}"
-  AC_ARG_WITH([proj-data],
-    AC_HELP_STRING([--with-proj-data=DIR],
-                   [location of PROJ.4 data directory]),
-    [proj_lib1=$withval])
-  if test -n "${proj_lib0}" ; then
-    proj_lib="${proj_lib0}"
-  else
-    proj_lib="${proj_lib1}"
-  fi
-  if test -n "${proj_lib}" ; then
-    if test -d "${proj_lib}" ; then
+  dnl determine which directory
+  AS_IF([ test -n "${proj_lib0}" ],
+    [proj_lib="${proj_lib0}"],
+    [proj_lib="${proj_lib1}"])
+
+  dnl test directory exists
+  AS_IF([ test -n "${proj_lib}" && test -d "${proj_lib}" ],
+    [ dnl run copy command
       cp -r "${proj_lib}" "${R_PACKAGE_DIR}"
       AC_MSG_NOTICE([  PROJ.4: ${proj_lib}])
-    else
+    ],
+    [ dnl directory not found
       AC_MSG_ERROR([PROJ.4 data files not found; set environment variable PROJ_LIB=DIR or --with-proj-data=DIR.])
-    fi
-  else
-      AC_MSG_ERROR([PROJ.4 data files not found; set environment variable PROJ_LIB=DIR or --with-proj-data=DIR.])
-  fi
+    ])
+  dnl test gdal data dir exists - tested previously
+  AS_IF([ test -d "${GDAL_DATADIR}" ],
+    [ dnl run copy command
+      cp -r "${GDAL_DATADIR}" "${R_PACKAGE_DIR}"
+      AC_MSG_NOTICE([  GDAL: ${GDAL_DATADIR}])
+    ],
+    [ dnl directory disappeared
+      AC_MSG_ERROR([GDAL data files not found.])
+    ])
+])
 
-  if test -d "${GDAL_DATADIR}" ; then
-    cp -r "${GDAL_DATADIR}" "${R_PACKAGE_DIR}"
-    AC_MSG_NOTICE([  GDAL: ${GDAL_DATADIR}])
-  else
-    AC_MSG_ERROR([GDAL data files not found.])
-  fi
-fi
-
+#AC_MSG_ERROR([Halt])
 
 # concluding substitution
 
@@ -565,11 +440,10 @@ fi
 if test [ -n "$proj_lib_path" ] ; then
 AC_SUBST([PKG_LIBS], ["${PKG_LIBS} -L${proj_lib_path}"])
 fi
-AC_SUBST([PKG_LIBS], ["${PKG_LIBS} -lproj"])
+AC_SUBST([PKG_LIBS], ["${PROJ4_LIBS} -lproj"])
 
 AC_MSG_NOTICE([Package CPP flags: ${PKG_CPPFLAGS}])
 AC_MSG_NOTICE([Package LIBS: ${PKG_LIBS}])
 
 AC_CONFIG_FILES(src/Makevars)
 AC_OUTPUT
-
